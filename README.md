@@ -60,7 +60,7 @@ tests/test1/path2/file8.txt
 tests/test1/path2/file9.txt
 ```
 
-```
+```console
 ❯ pathdiff compare-directories tests/test2/path1 tests/test2/path2
 Comparing directories tests/test2/path1 and tests/test2/path2
 Comparing directory structures
