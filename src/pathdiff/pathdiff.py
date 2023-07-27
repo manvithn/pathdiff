@@ -196,7 +196,7 @@ def compare_directories_impl(dirs):
 def cli():
     pass
 
-@cli.command()
+@cli.command(help="Finds duplicate files in the provided directories by intelligently comparing file contents.", short_help="Finds duplicate files in the provided directories")
 @click.argument("dirs", type=click.Path(exists=True, file_okay=False), nargs=-1)
 def find_duplicates(dirs):
     for files in find_duplicates_impl(dirs):
@@ -206,7 +206,7 @@ def find_duplicates(dirs):
         click.echo(f"{filenamestr}")
         click.echo("")
 
-@cli.command()
+@cli.command(help="Compares directory structures and recursively compares files, similar to diff -rq. For each pair of directories, list files that are not found in one of the directories, or are found in both but where the contents do not match.", short_help="Compares directory structures and recursively compares files")
 @click.argument("dirs", type=click.Path(exists=True, file_okay=False), nargs=-1)
 def compare_directories(dirs):
     for (dir1, dir2), (files_dir1, files_dir2, files_not_matching) in compare_directories_impl(dirs).items():
