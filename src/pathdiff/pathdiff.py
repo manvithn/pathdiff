@@ -72,9 +72,64 @@ def get_files_from_dir(dir):
     with alive_bar(spinner=None) as progress:
         for subdirpath, _, files in os.walk(dir):
             for realpath, relpath in translate_to_paths(subdirpath, files, dir):
-                paths[(dir, relpath)] = realpath
+                paths[realpath] = (dir, relpath)
                 progress()
     return paths
+
+
+def compare_file_hashes(files):
+    """Classify files by size, hash of the first 1024 bytes, and hash of the full file"""
+    # { file_size: [ realpath_to_file1, realpath_to_file2, ] }
+    size_to_file = defaultdict(list)
+    # { (small_hash, file_size): [ realpath_to_file1, realpath_to_file2, ] }
+    small_hash_to_file = defaultdict(list)
+    # { full_hash: [ realpath_to_file1, realpath_to_file2, ] }
+    full_hash_to_file = defaultdict(list)
+
+    click.echo("Fetching file sizes")
+    for filepath in alive_it(files, spinner=None):
+        # Group files that have the same size - they are the collision candidates
+        try:
+            file_size = os.path.getsize(filepath)
+        except OSError:
+            # not accessible (permissions, etc) - pass on
+            continue
+        size_to_file[file_size].append(filepath)
+
+    click.echo("Computing small hashes")
+    total_files = sum(len(files) for files in size_to_file.values() if len(files) > 1)
+    with alive_bar(total_files, spinner=None) as progress:
+        # For all files with the same file size, get their hash on the 1st 1024 bytes only
+        for file_size, files in size_to_file.items():
+            assert len(files) > 0
+            if len(files) == 1:
+                # This file size is unique, no need to spend cpu cycles on it
+                continue
+
+            for filepath in files:
+                small_hash = get_hash(filepath, first_chunk_only=True)
+                # Map from hash of 1024 bytes and the file size - to avoid collisions on equal
+                # hashes in the first part of the file
+                # credits to @Futal for the optimization
+                small_hash_to_file[(small_hash, file_size)].append(filepath)
+                progress()
+
+    click.echo("Computing full hashes")
+    total_files = sum(len(files) for files in small_hash_to_file.values() if len(files) > 1)
+    with alive_bar(total_files, spinner=None) as progress:
+        # For all files with the hash on the 1st 1024 bytes, get their hash on the full file
+        for files in small_hash_to_file.values():
+            assert len(files) > 0
+            if len(files) == 1:
+                # This hash/file_size combination is unique, no need to spend cpu cycles on it
+                continue
+
+            for filepath in files:
+                full_hash = get_hash(filepath)
+                full_hash_to_file[full_hash].append(filepath)
+                progress()
+
+    return size_to_file, small_hash_to_file, full_hash_to_file
 
 
 def compare_dir_structures(dir1, dir2):
@@ -128,62 +183,14 @@ def find_duplicates_impl(dirs):
     for dir, reldir in paths_to_realpaths(dirs).items():
         click.echo(f"Fetching files from {reldir}")
         paths = get_files_from_dir(dir)
-        files.extend(paths.values())
-
-    # { file_size: [ realpath_to_file1, realpath_to_file2, ] }
-    size_to_file = defaultdict(list)
-    # { (small_hash, file_size): [ realpath_to_file1, realpath_to_file2, ] }
-    small_hash_to_file = defaultdict(list)
-    # { full_hash: [ realpath_to_file1, realpath_to_file2, ] }
-    full_hash_to_file = defaultdict(list)
-
-    click.echo("Fetching file sizes")
-    for filepath in alive_it(files, spinner=None):
-        # Group files that have the same size - they are the collision candidates
-        try:
-            file_size = os.path.getsize(filepath)
-        except OSError:
-            # not accessible (permissions, etc) - pass on
-            continue
-        size_to_file[file_size].append(filepath)
-
-    click.echo("Computing small hashes")
-    total_files = sum(len(files) for files in size_to_file.values() if len(files) > 1)
-    with alive_bar(total_files, spinner=None) as progress:
-        # For all files with the same file size, get their hash on the 1st 1024 bytes only
-        for file_size, files in size_to_file.items():
-            assert len(files) > 0
-            if len(files) == 1:
-                # This file size is unique, no need to spend cpu cycles on it
-                continue
-
-            for filepath in files:
-                small_hash = get_hash(filepath, first_chunk_only=True)
-                # Map from hash of 1024 bytes and the file size - to avoid collisions on equal
-                # hashes in the first part of the file
-                # credits to @Futal for the optimization
-                small_hash_to_file[(small_hash, file_size)].append(filepath)
-                progress()
-
-    click.echo("Computing full hashes")
-    total_files = sum(len(files) for files in small_hash_to_file.values() if len(files) > 1)
-    with alive_bar(total_files, spinner=None) as progress:
-        # For all files with the hash on the 1st 1024 bytes, get their hash on the full file
-        for files in small_hash_to_file.values():
-            assert len(files) > 0
-            if len(files) == 1:
-                # This hash/file_size combination is unique, no need to spend cpu cycles on it
-                continue
-
-            for filepath in files:
-                full_hash = get_hash(filepath)
-                full_hash_to_file[full_hash].append(filepath)
-                progress()
+        files.extend(paths.keys())
+    _, _, full_hash_to_file = compare_file_hashes(files)
 
     dup_stats = []
     for files in full_hash_to_file.values():
         if len(files) > 1:
-            dup_stats.append([path_to_real_and_relative(file)[1] for file in files])
+            relfiles = [path_to_real_and_relative(file)[1] for file in files]
+            dup_stats.append(relfiles)
     return dup_stats
 
 
@@ -209,6 +216,64 @@ def compare_directories_impl(dirs):
             if not filecmp.cmp(realpath1, realpath2, shallow=False):
                 files_do_not_match.append(f)
         diff_stats[(reldir1, reldir2)] = (paths_only_dir1, paths_only_dir2, files_do_not_match)
+
+    return diff_stats
+
+
+def compare_contents_impl(dirs):
+    """Implementation for compare_contents command, does not handle output formatting"""
+    # { (dir1, dir2): (files_only_dir1, files_only_dir2, not_one_to_one) } where not_one_to_one is
+    # [ ([file1_dir1, file2_dir1, ], [file1_dir2, file2_dir2, ]), ]
+    diff_stats = OrderedDict()
+
+    for (dir1, reldir1), (dir2, reldir2) in combinations(paths_to_realpaths(dirs).items(), 2):
+        click.echo(f"Comparing contents in directories {reldir1} and {reldir2}")
+        click.echo(f"Fetching files from {reldir1}")
+        paths1 = get_files_from_dir(dir1)
+        click.echo(f"Fetching files from {reldir2}")
+        paths2 = get_files_from_dir(dir2)
+        files1, files2 = list(paths1.keys()), list(paths2.keys())
+        _, _, full_hash_to_file = compare_file_hashes(files1 + files2)
+
+        fset1, fset2 = set(files1), set(files2)
+
+        def remove_files_from_sets(files):
+            for file in files:
+                fset1.discard(file)
+                fset2.discard(file)
+
+        not_one_to_one_groups = []
+        for files in full_hash_to_file.values():
+            assert len(files) > 0
+            if len(files) == 1:
+                # this file hash is unique, do not remove it from fset1 or fset2
+                continue
+
+            if len(files) == 2:
+                [file1, file2] = files
+                name1, name2 = os.path.basename(file1), os.path.basename(file2)
+                one_to_one_left = file1 in fset1 and file2 in fset2
+                one_to_one_right = file1 in fset2 and file2 in fset1
+                if name1 == name2 and (one_to_one_left or one_to_one_right):
+                    remove_files_from_sets(files)
+                    # these files match one-to-one, do not add them to not_one_to_one_groups
+                    continue
+
+            remove_files_from_sets(files)
+            not_one_to_one_groups.append(files)
+
+        files_only_dir1 = [paths1[file][1] for file in fset1]
+        files_only_dir2 = [paths2[file][1] for file in fset2]
+        not_one_to_one = []
+        for files in not_one_to_one_groups:
+            dir1_dups, dir2_dups = [], []
+            for file in files:
+                if file in paths1:
+                    dir1_dups.append(paths1[file][1])
+                else:
+                    dir2_dups.append(paths2[file][1])
+            not_one_to_one.append((dir1_dups, dir2_dups))
+        diff_stats[(reldir1, reldir2)] = (files_only_dir1, files_only_dir2, not_one_to_one)
 
     return diff_stats
 
@@ -264,4 +329,41 @@ def compare_directories(dirs):
         click.echo(f"Files found in {dir1} and {dir2} but contents do not match:")
         filenamestr = '\n'.join(files_not_matching)
         click.echo(f"{filenamestr}")
+        click.echo("")
+
+
+@cli.command(
+    help=(
+        "Compares directory contents by detecting one-to-one matches of files. For each pair of"
+        " directories, list files that are not found in one of the directories, lack a one-to-one"
+        " match, or have different names."
+    ),
+    short_help="Compares contents ignoring directory structure",
+)
+@click.argument("dirs", type=click.Path(exists=True, file_okay=False), nargs=-1)
+def compare_contents(dirs):
+    """compare_contents command definition, handles output formatting"""
+    for (dir1, dir2), classification in compare_contents_impl(dirs).items():
+        files_only_dir1, files_only_dir2, not_one_to_one = classification
+
+        click.echo("")
+        click.echo(f"Files found in {dir1} but not found in {dir2} (by content, names may match):")
+        filenamestr = '\n'.join(files_only_dir1)
+        click.echo(f"{filenamestr}")
+        click.echo("")
+
+        click.echo(f"Files found in {dir2} but not found in {dir1} (by content, names may match):")
+        filenamestr = '\n'.join(files_only_dir2)
+        click.echo(f"{filenamestr}")
+        click.echo("")
+
+        click.echo("Files which do not match one-to-one or have different names:")
+        for dir1_dups, dir2_dups in not_one_to_one:
+            click.echo("Group of duplicate files:")
+            click.echo(f"Duplicates from {dir1}:")
+            filenamestr = '\n'.join(dir1_dups)
+            click.echo(f"{filenamestr}")
+            click.echo(f"Duplicates from {dir2}:")
+            filenamestr = '\n'.join(dir2_dups)
+            click.echo(f"{filenamestr}")
         click.echo("")
