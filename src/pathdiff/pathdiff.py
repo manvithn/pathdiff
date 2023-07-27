@@ -202,8 +202,8 @@ def find_duplicates(dirs):
     for files in find_duplicates_impl(dirs):
         click.echo("")
         click.echo("Duplicates found:")
-        filestr = '\n'.join(files)
-        click.echo(f"{filestr}")
+        filenamestr = '\n'.join(files)
+        click.echo(f"{filenamestr}")
         click.echo("")
 
 @cli.command()
@@ -222,8 +222,8 @@ def compare_directories(dirs):
         click.echo("")
 
         click.echo(f"Files found in {dir1} and {dir2} but contents do not match:")
-        filestr = '\n'.join(files_not_matching)
-        click.echo(f"{filestr}")
+        filenamestr = '\n'.join(files_not_matching)
+        click.echo(f"{filenamestr}")
         click.echo("")
 
 if __name__ == "__main__":
