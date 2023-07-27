@@ -225,6 +225,3 @@ def compare_directories(dirs):
         filenamestr = '\n'.join(files_not_matching)
         click.echo(f"{filenamestr}")
         click.echo("")
-
-if __name__ == "__main__":
-    cli()
